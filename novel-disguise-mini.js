@@ -770,18 +770,21 @@
             return Math.random() < 0.5 ? '是' : '否';
         }
 
-        // Excel 条件格式风格的百分比 + 热力图背景色
-        function getPercentageHeatmap() {
-            const value = getRandomInt(0, 100);
-            let bg;
-            if (value < 34) {
-                bg = `rgba(248, 105, 107, ${0.5 + (1 - value / 34) * 0.4})`;
-            } else if (value < 67) {
-                bg = `rgba(255, 222, 132, 0.85)`;
-            } else {
-                bg = `rgba(99, 190, 123, ${0.5 + ((value - 67) / 33) * 0.4})`;
-            }
-            return `<div style="background:${bg};margin:-3px -10px;padding:3px 10px;text-align:center;color:#000;">${value}%</div>`;
+        // 低饱和度填充色 (Excel 单元格高亮的常用色)
+        // 注意 inline !important: 用于覆盖 common() 里的 #disguised-content div{background:#FFF!important}
+        function getFilledColorCell() {
+            const palette = [
+                '#FFF2CC', // 浅黄
+                '#D9E1F2', // 浅蓝
+                '#E2EFDA', // 浅绿
+                '#FCE4D6', // 浅橙
+                '#F4CCCC', // 浅红
+                '#EDEDED'  // 浅灰
+            ];
+            // 30% 留白, 让整列不要太花
+            if (Math.random() < 0.3) return '';
+            const color = palette[Math.floor(Math.random() * palette.length)];
+            return `<div style="background-color:${color} !important;margin:-3px -10px;padding:3px 10px;">&nbsp;</div>`;
         }
 
         // 千分位货币
@@ -795,9 +798,9 @@
         function getProgressBar() {
             const value = getRandomInt(5, 100);
             const barColor = value > 70 ? '#4a90d9' : value > 30 ? '#7fb069' : '#e08e45';
-            return `<div style="position:relative;background:#f0f0f0;margin:-3px -10px;padding:0;height:18px;line-height:18px;">
-                <div style="background:${barColor};height:100%;width:${value}%;opacity:0.7;"></div>
-                <div style="position:absolute;top:0;left:0;width:100%;text-align:center;font-size:11px;color:#000;">${value}%</div>
+            return `<div style="position:relative;background-color:#f0f0f0 !important;margin:-3px -10px;padding:0;height:18px;line-height:18px;">
+                <div style="background-color:${barColor} !important;height:100%;width:${value}%;opacity:0.7;"></div>
+                <div style="position:absolute;top:0;left:0;width:100%;text-align:center;font-size:11px;color:#000;background-color:transparent !important;">${value}%</div>
             </div>`;
         }
 
@@ -813,9 +816,9 @@
             case 5:
                 return generateRandomLetters(1, true);
             case 6:
-                return getYesNo();
+                return getFilledColorCell();
             case 7:
-                return getPercentageHeatmap();
+                return getYesNo();
             case 8:
                 return getCurrency();
             case 9:
@@ -1249,6 +1252,22 @@
                 applyMode(DICT.MODE.ORIGINAL);
             }
         }
+    });
+
+    // 老板键 R: 切换正文列 (B列) 的可见性, 起点/番茄/微信读书通用
+    // 通过 body 上的 class 控制, 动态新增的行也会自动生效
+    GM_addStyle(`
+        body.boss-mode .excel-table > tbody > tr > td:nth-child(2),
+        body.boss-mode .excel-table > tbody > tr > td:nth-child(2) * {
+            visibility: hidden !important;
+        }
+    `);
+    document.addEventListener('keydown', function (event) {
+        if (event.key !== 'r' || event.ctrlKey || event.altKey || event.metaKey) return;
+        const tag = (event.target && event.target.tagName) || '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || (event.target && event.target.isContentEditable)) return;
+        const hidden = document.body.classList.toggle('boss-mode');
+        printLog(`老板键 R: 正文列 ${hidden ? '已隐藏' : '已显示'}`);
     });
 
     // 原始模式: 仅提示按 E 开启
