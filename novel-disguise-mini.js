@@ -1,14 +1,15 @@
 // ==UserScript==
-// @name         小说页面伪装(起点/番茄, 仅Excel)
+// @name         小说页面伪装
 // @namespace    https://github.com/NiaoBlush/novel-disguise
-// @version      2.11.0-mini
-// @description  仅适配起点和番茄, 仅保留Excel伪装模式. 基于NiaoBlush的novel-disguise脚本(MIT)精简改造.
+// @version      2.12.0-mini
+// @description  适配起点/番茄/微信读书, 仅保留Excel伪装模式. 基于NiaoBlush的novel-disguise脚本(MIT)精简改造.
 // @author       NiaoBlush (modified)
 // @license      MIT
 // @run-at       document-end
 // @icon64       https://s21.ax1x.com/2024/08/06/pkxPf0S.png
 // @match        https://www.qidian.com/chapter/*
 // @match        https://fanqienovel.com/reader/*
+// @match        https://weread.qq.com/web/reader/*
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
@@ -95,7 +96,10 @@
 
             emptyCols: 20,
             enableExcelRandomPopulate: true,
-            maxExcelRandomPopulateCol: 9
+            maxExcelRandomPopulateCol: 9,
+
+            // 微信读书 canvas 缩放比例 (1 = 原始大小, 0.7 = 缩到 70%, 数字越小字越小)
+            wereadCanvasScale: 0.8
         };
         const stored = GM_getValue(KEY_CONFIG, {});
         const config = Object.assign({}, defaultConfig, stored);
@@ -714,7 +718,7 @@
     }
 
     function generateRandomContent(type = 1) {
-        type = (type % 6) + 1;
+        type = (type % 9) + 1;
 
         function generateRandomLetters(n, isUpperCase) {
             const letters = isUpperCase ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' : 'abcdefghijklmnopqrstuvwxyz';
@@ -766,6 +770,37 @@
             return Math.random() < 0.5 ? '是' : '否';
         }
 
+        // Excel 条件格式风格的百分比 + 热力图背景色
+        function getPercentageHeatmap() {
+            const value = getRandomInt(0, 100);
+            let bg;
+            if (value < 34) {
+                bg = `rgba(248, 105, 107, ${0.5 + (1 - value / 34) * 0.4})`;
+            } else if (value < 67) {
+                bg = `rgba(255, 222, 132, 0.85)`;
+            } else {
+                bg = `rgba(99, 190, 123, ${0.5 + ((value - 67) / 33) * 0.4})`;
+            }
+            return `<div style="background:${bg};margin:-3px -10px;padding:3px 10px;text-align:center;color:#000;">${value}%</div>`;
+        }
+
+        // 千分位货币
+        function getCurrency() {
+            const value = (Math.random() * 100000).toFixed(2);
+            const formatted = parseFloat(value).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            return `¥${formatted}`;
+        }
+
+        // 数据条 (Excel 的 in-cell bar chart)
+        function getProgressBar() {
+            const value = getRandomInt(5, 100);
+            const barColor = value > 70 ? '#4a90d9' : value > 30 ? '#7fb069' : '#e08e45';
+            return `<div style="position:relative;background:#f0f0f0;margin:-3px -10px;padding:0;height:18px;line-height:18px;">
+                <div style="background:${barColor};height:100%;width:${value}%;opacity:0.7;"></div>
+                <div style="position:absolute;top:0;left:0;width:100%;text-align:center;font-size:11px;color:#000;">${value}%</div>
+            </div>`;
+        }
+
         switch (type) {
             case 1:
                 return `${generateRandomLetters(2, true)}-${generateRandomLetters(2, true)}-${generateRandomLetters(2, true)}${getRandomPaddedInt(6)}`;
@@ -779,6 +814,12 @@
                 return generateRandomLetters(1, true);
             case 6:
                 return getYesNo();
+            case 7:
+                return getPercentageHeatmap();
+            case 8:
+                return getCurrency();
+            case 9:
+                return getProgressBar();
         }
     }
 
@@ -978,6 +1019,225 @@
         $(".arco-tooltip").remove();
     }
 
+    /**
+     * 微信读书
+     * 正文是 canvas 像素无法提取文字, 整体策略: 把 canvas 容器 detach 后塞进 B 列单元格,
+     * 用 rowspan 让它跨越 N 行, 序号与右侧假数据列正常排布.
+     */
+    function weread() {
+        GM_addStyle(`
+        /* 关键: 让原 #app 留在 DOM 中可渲染, 但移出视口
+           否则 display:none 会导致 Vue 探测 rootHeight=0 而不绘制 canvas */
+        body > #app {
+            display: block !important;
+            position: absolute !important;
+            top: 0 !important;
+            left: -100000px !important;
+            width: 1200px !important;
+            height: auto !important;
+            visibility: visible !important;
+            pointer-events: none;
+        }
+        /* 伪装层始终在最上面 */
+        #disguised-page { z-index: 100000; }
+
+        .readerTopBar, .readerControls, .readerFooter, .readerNotePanel,
+        .readerCatalog, .reader-font-control-panel-wrapper,
+        .wr_dialog, .arco-tooltip, .wr_tooltip_item { display: none !important; }
+
+        .excel-table tbody td, .excel-table tbody td p { font-family: unset; }
+        .excel-table .weread-canvas-cell {
+            padding: 0 !important;
+            vertical-align: top;
+            background-color: #FFF !important;
+        }
+        .excel-table .weread-canvas-cell .wr_canvasContainer {
+            position: relative !important;
+            margin: 0 auto;
+            pointer-events: auto;
+        }
+        .excel-table .weread-nav-cell {
+            text-align: center;
+            padding: 8px !important;
+        }
+        .excel-table .weread-nav-cell button {
+            background-color: ${link_bg_color} !important;
+            color: ${link_text_color} !important;
+            border: 1px solid #c0c0c0;
+            padding: 2px 12px;
+            margin: 0 5px;
+            font-size: 12px;
+            cursor: pointer;
+            height: 22px;
+            line-height: 18px;
+        }
+        `);
+
+        // 把 common() 加在 #app 上的 inline display:none 移除
+        $('#app').css('display', '');
+
+        function waitForCanvas(maxWaitMs, onReady, onTimeout) {
+            const startedAt = Date.now();
+            let attempts = 0;
+            const timer = setInterval(function () {
+                attempts++;
+                const $container = $('.wr_canvasContainer');
+                const $canvases = $container.find('canvas');
+                const styleAttr = $container.attr('style') || '';
+                const heightMatch = styleAttr.match(/height:\s*(\d+)px/i);
+                const totalHeight = heightMatch ? parseInt(heightMatch[1]) : 0;
+
+                if (attempts === 1 || attempts % 10 === 0) {
+                    printLog(`waitForCanvas: container=${$container.length}, canvases=${$canvases.length}, height=${totalHeight}, style="${styleAttr.slice(0, 80)}"`);
+                }
+
+                if ($container.length > 0 && $canvases.length > 0 && totalHeight > 100) {
+                    clearInterval(timer);
+                    printLog(`canvas 就绪, 总高 ${totalHeight}px, 共 ${$canvases.length} 张`);
+                    onReady($container, totalHeight);
+                } else if (Date.now() - startedAt > maxWaitMs) {
+                    clearInterval(timer);
+                    printLog("error", `等待 canvas 渲染超时, 最后状态: container=${$container.length}, canvases=${$canvases.length}, height=${totalHeight}`);
+                    if (typeof onTimeout === 'function') onTimeout();
+                }
+            }, 200);
+        }
+
+        function buildNavRow($tbody, rowIndex) {
+            const $prevBtnSrc = $('.readerContentHeader .readerHeaderButton').first();
+            const $nextBtnSrc = $('.readerFooter .readerFooter_button').first();
+            printLog(`查找翻页按钮: 上一章=${$prevBtnSrc.length}, 下一章=${$nextBtnSrc.length}`);
+
+            const $navRow = $('<tr></tr>');
+            $navRow.append($('<td></td>').text(rowIndex));
+            const $navCell = $(`<td class="weread-nav-cell"></td>`);
+            if ($prevBtnSrc.length) {
+                const $prevBtn = $('<button>上一章</button>');
+                $prevBtn.on('click', function () { $prevBtnSrc[0].click(); });
+                $navCell.append($prevBtn);
+            }
+            if ($nextBtnSrc.length) {
+                const $nextBtn = $('<button>下一章</button>');
+                $nextBtn.on('click', function () { $nextBtnSrc[0].click(); });
+                $navCell.append($nextBtn);
+            }
+            if (!$prevBtnSrc.length && !$nextBtnSrc.length) {
+                $navCell.text('(未找到翻页按钮)');
+            }
+            $navRow.append($navCell);
+            for (let i = 0; i < config.emptyCols; i++) {
+                let tdContent = "";
+                if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
+                    tdContent = generateRandomContent(i);
+                }
+                $navRow.append($(`<td>${tdContent}</td>`));
+            }
+            $tbody.append($navRow);
+        }
+
+        // 提前给个占位标题, 真正的章节名等 Vue 渲染完再读取
+        setDisguisedTitle("工作簿1");
+        setDisguisedFooter("");
+
+        function refreshTitleFromDOM() {
+            const chapterTitle = $('.readerTopBar_title_chapter').text().trim();
+            const bookTitle = $('.readerTopBar_title_link').text().trim();
+            if (chapterTitle) setDisguisedTitle(chapterTitle);
+            if (bookTitle) setDisguisedFooter(`《${bookTitle}》`);
+            printLog(`刷新标题: 章节="${chapterTitle}", 书名="${bookTitle}"`);
+        }
+
+        waitForCanvas(15000, function ($container, canvasTotalHeight) {
+            // canvas 就绪 = Vue 渲染完成, 此时读标题最稳
+            refreshTitleFromDOM();
+            const rowHeight = 22;
+            const scale = config.wereadCanvasScale || 1;
+            const scaledCanvasHeight = Math.ceil(canvasTotalHeight * scale);
+            const canvasRowSpan = Math.max(5, Math.ceil(scaledCanvasHeight / rowHeight));
+
+            const $tbody = $(".excel-table > tbody");
+            $tbody.empty();
+
+            // 读取容器原始宽度 (微信读书固定 798), 准备缩放
+            const origStyleAttr = $container.attr('style') || '';
+            const widthMatch = origStyleAttr.match(/width:\s*(\d+)px/i);
+            const origWidth = widthMatch ? parseInt(widthMatch[1]) : 798;
+            const scaledWidth = Math.ceil(origWidth * scale);
+
+            const $detachedContainer = $container.detach();
+
+            // 用 wrapper 提供新的布局盒子, 内部 canvas 容器靠 transform 缩放
+            const $scaleWrapper = $('<div class="weread-canvas-scale-wrapper"></div>').css({
+                width: scaledWidth + 'px',
+                height: scaledCanvasHeight + 'px',
+                overflow: 'hidden',
+                position: 'relative'
+            });
+            $detachedContainer.css({
+                transform: `scale(${scale})`,
+                'transform-origin': 'top left',
+                position: 'absolute',
+                top: '0',
+                left: '0'
+            });
+            $scaleWrapper.append($detachedContainer);
+
+            const $firstRow = $('<tr></tr>');
+            $firstRow.append($('<td></td>').text(1));
+            const $canvasCell = $('<td class="weread-canvas-cell"></td>').attr('rowspan', canvasRowSpan);
+            $scaleWrapper.appendTo($canvasCell);
+            $firstRow.append($canvasCell);
+            for (let i = 0; i < config.emptyCols; i++) {
+                let tdContent = "";
+                if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
+                    tdContent = generateRandomContent(i);
+                }
+                $firstRow.append($(`<td>${tdContent}</td>`));
+            }
+            $tbody.append($firstRow);
+
+            for (let r = 2; r <= canvasRowSpan; r++) {
+                const $tr = $('<tr></tr>');
+                $tr.append($('<td></td>').text(r));
+                for (let i = 0; i < config.emptyCols; i++) {
+                    let tdContent = "";
+                    if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
+                        tdContent = generateRandomContent(i);
+                    }
+                    $tr.append($(`<td>${tdContent}</td>`));
+                }
+                $tbody.append($tr);
+            }
+
+            buildNavRow($tbody, canvasRowSpan + 1);
+
+            const reRenderObserver = new MutationObserver(function () {
+                const $newContainer = $('.app_content .wr_canvasContainer').not($canvasCell.find('.wr_canvasContainer'));
+                if ($newContainer.length) {
+                    const styleAttr = $newContainer.attr('style') || '';
+                    const heightMatch = styleAttr.match(/height:\s*(\d+)px/i);
+                    const newHeight = heightMatch ? parseInt(heightMatch[1]) : 0;
+                    if (newHeight > 100) {
+                        printLog("检测到章节切换, 刷新页面");
+                        setTimeout(function () { location.reload(); }, 200);
+                    }
+                }
+            });
+            reRenderObserver.observe(document.body, {childList: true, subtree: true});
+        }, function () {
+            const $tbody = $(".excel-table > tbody");
+            $tbody.empty();
+            const $errRow = $('<tr></tr>');
+            $errRow.append($('<td></td>').text(1));
+            $errRow.append($('<td style="color:#c33;padding:10px !important;">canvas 加载超时, 请刷新页面重试. 如多次失败, 检查 F12 控制台日志.</td>'));
+            for (let i = 0; i < config.emptyCols; i++) {
+                $errRow.append($('<td></td>'));
+            }
+            $tbody.append($errRow);
+            buildNavRow($tbody, 2);
+        });
+    }
+
     ///////////////////////////// 站点结束
 
     // E 键切换原始界面
@@ -1041,8 +1301,12 @@
             common();
             fanqie();
             break;
+        case 'weread.qq.com':
+            common();
+            weread();
+            break;
         default:
-            printLog("error", "当前站点未适配 (本精简版仅支持起点和番茄)");
+            printLog("error", "当前站点未适配 (本精简版仅支持起点/番茄/微信读书)");
     }
 
     GM_registerMenuCommand("设置", settings);
