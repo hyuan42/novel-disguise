@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         小说页面伪装
+// @name         页面伪装
 // @namespace    https://github.com/NiaoBlush/novel-disguise
 // @version      2.12.0-mini
 // @description  适配起点/番茄/微信读书, 仅保留Excel伪装模式. 基于NiaoBlush的novel-disguise脚本(MIT)精简改造.
@@ -98,6 +98,9 @@
             enableExcelRandomPopulate: true,
             maxExcelRandomPopulateCol: 9,
 
+            // 正文列 (B列) 宽度, px. 用户可在设置面板里通过滑块调整 (起点/番茄生效, 微信读书由 canvas 缩放控制)
+            bodyContentWidth: 700,
+
             // 微信读书 canvas 缩放比例 (1 = 原始大小, 0.7 = 缩到 70%, 数字越小字越小)
             wereadCanvasScale: 0.8
         };
@@ -147,6 +150,11 @@
                     <label style="margin-left: 4px;"><input type="radio" name="settings-res-resolution" value="${DICT.RESOURCE_RESOLUTION.FORCE_2K}">2K</label>
                     <label style="margin-left: 4px;"><input type="radio" name="settings-res-resolution" value="${DICT.RESOURCE_RESOLUTION.FORCE_4K}">4K</label>
                 </div>
+                <div class="nd-settings-form-group">
+                    <label>正文宽度: </label>
+                    <input type="range" name="settings-body-width" min="300" max="1200" step="10" style="width:160px;vertical-align:middle;">
+                    <span class="settings-body-width-display" style="margin-left:8px;font-size:12px;color:#666;">700px</span>
+                </div>
                 <div class="nd-settings-form-group" style="margin-top: 20px;">
                     <div class="nd-settings-btn-wrapper">
                         <button type="submit">保存设置</button>
@@ -158,6 +166,15 @@
         $settings.find("select[name=settings-theme]").val(config.theme);
         $settings.find(`input[name=settings-hide-image][value='${String(config.hideImage)}']`).prop('checked', true);
         $settings.find(`input[name=settings-res-resolution][value='${config.resourceResolution}']`).prop('checked', true);
+        $settings.find('input[name=settings-body-width]').val(config.bodyContentWidth);
+        $settings.find('.settings-body-width-display').text(config.bodyContentWidth + 'px');
+
+        // 滑块拖动时实时预览 (改 CSS 变量, 不写存储)
+        $settings.find('input[name=settings-body-width]').on('input', function () {
+            const v = parseInt(this.value);
+            $settings.find('.settings-body-width-display').text(v + 'px');
+            document.documentElement.style.setProperty('--body-content-width', v + 'px');
+        });
 
         const $modal = showModal($settings, {title: "设置"});
 
@@ -167,9 +184,10 @@
             config.theme = formDataObj.get('settings-theme');
             config.hideImage = formDataObj.get('settings-hide-image') === 'true';
             config.resourceResolution = formDataObj.get('settings-res-resolution');
+            config.bodyContentWidth = parseInt(formDataObj.get('settings-body-width')) || 700;
             writeConfig();
 
-            popMsg("设置已保存，刷新页面后生效");
+            popMsg("设置已保存");
             $modal.remove();
         });
     }
@@ -557,7 +575,12 @@
 
         .excel-table th { min-width: 71px; }
         .excel-table th:nth-child(1) { width: auto; min-width: 20px; }
-        .excel-table th:nth-child(2) { min-width: 50vw; }
+        /* 正文列 (B) 宽度由 CSS 变量控制, 用户可在设置里通过滑块调整 */
+        .excel-table th:nth-child(2),
+        .excel-table tbody > tr > td:nth-child(2) {
+            width: var(--body-content-width, 700px);
+            white-space: normal;
+        }
 
         .excel-table > tbody > tr > td:nth-child(1) {
             text-align: center;
@@ -605,6 +628,9 @@
         $table.append($thead);
         $table.append($tbody);
         $("#disguised-content").append($table);
+
+        // 应用 B 列宽度 CSS 变量 (用户可在设置中通过滑块调整)
+        document.documentElement.style.setProperty('--body-content-width', config.bodyContentWidth + 'px');
 
         padExcelBlankLines();
     }
@@ -1028,6 +1054,19 @@
      * 用 rowspan 让它跨越 N 行, 序号与右侧假数据列正常排布.
      */
     function weread() {
+        // 微信读书根据 window.innerHeight 决定画多少 canvas, 小屏上只画前 2 段就停.
+        // 把 innerHeight 覆盖成一个大值, 强制 weread 一次画完所有 canvas.
+        // 注意: 不能改 window 本身, 只能用 defineProperty 覆盖 getter.
+        try {
+            Object.defineProperty(window, 'innerHeight', {
+                configurable: true,
+                get: function () { return 5000; }
+            });
+            printLog('已覆盖 window.innerHeight=5000 以强制 canvas 完整渲染');
+        } catch (e) {
+            printLog('warn', '覆盖 window.innerHeight 失败: ' + e.message);
+        }
+
         GM_addStyle(`
         /* 关键: 让原 #app 留在 DOM 中可渲染, 但移出视口
            否则 display:none 会导致 Vue 探测 rootHeight=0 而不绘制 canvas */
@@ -1037,7 +1076,7 @@
             top: 0 !important;
             left: -100000px !important;
             width: 1200px !important;
-            height: auto !important;
+            height: 20000px !important;
             visibility: visible !important;
             pointer-events: none;
         }
@@ -1049,7 +1088,9 @@
         .wr_dialog, .arco-tooltip, .wr_tooltip_item { display: none !important; }
 
         .excel-table tbody td, .excel-table tbody td p { font-family: unset; }
+        /* 微信读书 canvas 单元格无视全局 B 列宽度, 始终贴合 canvas. 用 wereadCanvasScale 调整 */
         .excel-table .weread-canvas-cell {
+            width: auto !important;
             padding: 0 !important;
             vertical-align: top;
             background-color: #FFF !important;
@@ -1057,7 +1098,10 @@
         .excel-table .weread-canvas-cell .wr_canvasContainer {
             position: relative !important;
             margin: 0 auto;
-            pointer-events: auto;
+            pointer-events: none;
+        }
+        .excel-table .weread-canvas-cell .wr_canvasContainer canvas {
+            pointer-events: none;
         }
         .excel-table .weread-nav-cell {
             text-align: center;
@@ -1082,6 +1126,8 @@
         function waitForCanvas(maxWaitMs, onReady, onTimeout) {
             const startedAt = Date.now();
             let attempts = 0;
+            let lastCoverage = -1;
+            let stableCount = 0;
             const timer = setInterval(function () {
                 attempts++;
                 const $container = $('.wr_canvasContainer');
@@ -1090,17 +1136,36 @@
                 const heightMatch = styleAttr.match(/height:\s*(\d+)px/i);
                 const totalHeight = heightMatch ? parseInt(heightMatch[1]) : 0;
 
+                // 计算所有 canvas 实际覆盖到的最大 y 位置, 判断 weread 是否画完
+                let canvasCoverage = 0;
+                $canvases.each(function () {
+                    const cTop = parseFloat(this.style.top) || 0;
+                    const cHeight = parseFloat(this.style.height) || 0;
+                    canvasCoverage = Math.max(canvasCoverage, cTop + cHeight);
+                });
+
                 if (attempts === 1 || attempts % 10 === 0) {
-                    printLog(`waitForCanvas: container=${$container.length}, canvases=${$canvases.length}, height=${totalHeight}, style="${styleAttr.slice(0, 80)}"`);
+                    printLog(`waitForCanvas: container=${$container.length}, canvases=${$canvases.length}, height=${totalHeight}, coverage=${canvasCoverage}, style="${styleAttr.slice(0, 80)}"`);
                 }
 
-                if ($container.length > 0 && $canvases.length > 0 && totalHeight > 100) {
+                const basicReady = $container.length > 0 && $canvases.length > 0 && totalHeight > 100;
+                // canvas 覆盖到容器高度的 95% 以上 = 渲染完成
+                const fullyPainted = basicReady && canvasCoverage >= totalHeight * 0.95;
+                // 或者连续 3 次轮询 (600ms) 覆盖范围都不再增长, 认为 weread 已经画到极限
+                if (basicReady && canvasCoverage === lastCoverage) {
+                    stableCount++;
+                } else {
+                    stableCount = 0;
+                }
+                lastCoverage = canvasCoverage;
+
+                if (fullyPainted || (basicReady && stableCount >= 3 && attempts >= 5)) {
                     clearInterval(timer);
-                    printLog(`canvas 就绪, 总高 ${totalHeight}px, 共 ${$canvases.length} 张`);
+                    printLog(`canvas 就绪, 容器高 ${totalHeight}px, 已绘制覆盖 ${canvasCoverage}px, 共 ${$canvases.length} 张`);
                     onReady($container, totalHeight);
                 } else if (Date.now() - startedAt > maxWaitMs) {
                     clearInterval(timer);
-                    printLog("error", `等待 canvas 渲染超时, 最后状态: container=${$container.length}, canvases=${$canvases.length}, height=${totalHeight}`);
+                    printLog("error", `等待 canvas 渲染超时, 最后状态: container=${$container.length}, canvases=${$canvases.length}, height=${totalHeight}, coverage=${canvasCoverage}`);
                     if (typeof onTimeout === 'function') onTimeout();
                 }
             }, 200);
