@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         页面优化
+// @name         小说页面伪装
 // @namespace    https://github.com/NiaoBlush/novel-disguise
 // @version      2.12.0-mini
 // @description  适配起点/番茄/微信读书, 仅保留Excel伪装模式. 基于NiaoBlush的novel-disguise脚本(MIT)精简改造.
@@ -28,6 +28,10 @@
     typeof NovelDisguiseResource !== "undefined" ? printLog("资源已载入") : printLog("error", "资源未载入");
 
     const screenInfo = getScreenInfo();
+    // 在 overridePageTitle() 把 document.title 改成 "工作簿1" 之前先把原始 <title> 存起来,
+    // 后续用于在 excel 表格顶端构造标题行. 使用 let 以便 SPA 切换章节时由 watchTitleChanges() 更新.
+    let originalDocTitle = (document.title || '').trim();
+    printLog('原始 <title>:', originalDocTitle);
     let disguised_header_img = null;
     let disguised_footer_img = null;
     let disguised_icon_img = null;
@@ -635,15 +639,70 @@
         document.documentElement.style.setProperty('--body-content-width', config.bodyContentWidth + 'px');
 
         padExcelBlankLines();
+        insertTitleRow();
+        watchTitleChanges();
     }
 
     function overridePageTitle() {
         document.title = "工作簿1";
     }
 
+    // 顶端标题行 (合并单元格), 内容取自原始 <title>
+    GM_addStyle(`
+        .excel-table > tbody > tr.disguised-title-row > td.disguised-title-cell {
+            text-align: left !important;
+            font-size: 15px !important;
+            font-weight: bold !important;
+            color: #1f4e79 !important;
+            background-color: #FAFAFA !important;
+            padding: 10px 14px !important;
+            border-bottom: 2px solid #5e9c4a !important;
+            letter-spacing: 0.3px;
+            line-height: 1.4;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .excel-table > tbody > tr.disguised-title-row > td:first-child {
+            background-color: #E6E6E6;
+        }
+    `);
+
+    function insertTitleRow() {
+        const $tbody = $(".excel-table > tbody");
+        if (!$tbody.length) return;
+        $tbody.find('.disguised-title-row').remove();
+        const title = originalDocTitle || '工作簿1';
+        const $tr = $('<tr class="disguised-title-row"></tr>');
+        $tr.append($('<td></td>'));   // 空序号格, 保留灰色背景
+        // colspan 跨越正文列 + 所有右侧数据列 (header A..T 共 20 个 + 行尾 1 个 = 21)
+        $tr.append($('<td class="disguised-title-cell" colspan="21"></td>').text(title));
+        $tbody.prepend($tr);
+    }
+
+    // 监听 <title> 元素变化, 用于 SPA 站点 (起点/微信读书) 切换章节时同步 excel 标题行.
+    // 必须排除 overridePageTitle() 设的 "工作簿1", 否则会把覆盖值反向写回标题行.
+    let _titleObserverAttached = false;
+    function watchTitleChanges() {
+        if (_titleObserverAttached) return;
+        const titleEl = document.querySelector('title');
+        if (!titleEl) return;
+        _titleObserverAttached = true;
+        const observer = new MutationObserver(function () {
+            const newTitle = (document.title || '').trim();
+            if (!newTitle || newTitle === '工作簿1' || newTitle === originalDocTitle) return;
+            originalDocTitle = newTitle;
+            $(".excel-table > tbody > tr.disguised-title-row > td.disguised-title-cell").text(newTitle);
+            printLog('检测到 <title> 变更, 已同步到表格标题行:', newTitle);
+        });
+        observer.observe(titleEl, { childList: true, subtree: true, characterData: true });
+        printLog('已挂载 <title> 变更监听');
+    }
+
     function clearExcelContent() {
         $(".excel-table tbody").empty();
         resetBigChartState();
+        insertTitleRow();
     }
 
     function getExcelLastIndex() {
@@ -1605,6 +1664,7 @@
             const $tbody = $(".excel-table > tbody");
             $tbody.empty();
             resetBigChartState();
+            insertTitleRow();
 
             // 读取容器原始宽度 (微信读书固定 798), 准备缩放
             const origStyleAttr = $container.attr('style') || '';
@@ -1664,6 +1724,7 @@
             const $tbody = $(".excel-table > tbody");
             $tbody.empty();
             resetBigChartState();
+            insertTitleRow();
             const $errRow = $('<tr></tr>');
             $errRow.append($('<td></td>').text(1));
             $errRow.append($('<td style="color:#c33;padding:10px !important;">canvas 加载超时, 请刷新页面重试. 如多次失败, 检查 F12 控制台日志.</td>'));
