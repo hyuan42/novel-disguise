@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         页面伪装
+// @name         页面优化
 // @namespace    https://github.com/NiaoBlush/novel-disguise
 // @version      2.12.0-mini
 // @description  适配起点/番茄/微信读书, 仅保留Excel伪装模式. 基于NiaoBlush的novel-disguise脚本(MIT)精简改造.
@@ -575,9 +575,11 @@
 
         .excel-table th { min-width: 71px; }
         .excel-table th:nth-child(1) { width: auto; min-width: 20px; }
-        /* 正文列 (B) 宽度由 CSS 变量控制, 用户可在设置里通过滑块调整 */
+        /* 正文列 (A) 宽度由 CSS 变量控制, 用户可在设置里通过滑块调整.
+           不能用 nth-child(2) 选 tbody 单元格 -- 微信读书的 canvas 用 rowspan 跨多行,
+           后续行的 nth-child(2) 会错位匹配到右侧假数据格. 改用 class 精确标记. */
         .excel-table th:nth-child(2),
-        .excel-table tbody > tr > td:nth-child(2) {
+        .excel-table tbody > tr > td.disguised-content-cell {
             width: var(--body-content-width, 700px);
             white-space: normal;
         }
@@ -641,6 +643,7 @@
 
     function clearExcelContent() {
         $(".excel-table tbody").empty();
+        resetBigChartState();
     }
 
     function getExcelLastIndex() {
@@ -674,7 +677,7 @@
             if (line === '') return;
             if (line instanceof $ && line.length === 0) return;
 
-            const $td2 = $('<td></td>');
+            const $td2 = $('<td class="disguised-content-cell"></td>');
             if (typeof rowHandler === 'function') {
                 line = rowHandler(line, index, $td2);
             }
@@ -684,13 +687,7 @@
             $td2.html(line);
             $tr.append($td1);
             $tr.append($td2);
-            for (let i = 0; i < config.emptyCols; i++) {
-                let tdContent = "";
-                if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
-                    tdContent = generateRandomContent(i);
-                }
-                $tr.append($(`<td>${tdContent}</td>`));
-            }
+            appendEmptyColsForRow($tr);
             $tbody.append($tr);
         });
     }
@@ -743,112 +740,500 @@
         return {screenWidth, screenHeight, devicePixelRatio, physicalWidth};
     }
 
-    function generateRandomContent(type = 1) {
-        type = (type % 9) + 1;
+    // 假数据样式集合, 每次刷新页面随机选一种, 增加伪装真实性
+    const DATA_STYLES = ['app_download', 'conversion_funnel', 'channel_share', 'kpi_dashboard'];
+    const currentDataStyle = DATA_STYLES[Math.floor(Math.random() * DATA_STYLES.length)];
+    printLog('当前假数据样式:', currentDataStyle);
 
-        function generateRandomLetters(n, isUpperCase) {
-            const letters = isUpperCase ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' : 'abcdefghijklmnopqrstuvwxyz';
-            let result = '';
-            for (let i = 0; i < n; i++) {
-                result += letters.charAt(Math.floor(Math.random() * letters.length));
-            }
-            return result;
-        }
-
+    function generateRandomContent(colIndex = 0) {
         function getRandomInt(a, b) {
             return Math.floor(Math.random() * (b - a + 1)) + a;
         }
-
-        function getRandomPaddedInt(n) {
-            const max = Math.pow(10, n) - 1;
-            const min = Math.pow(10, n - 1);
-            const randomInt = Math.floor(Math.random() * (max - min + 1)) + min;
-            return randomInt.toString().padStart(n, '0');
-        }
-
         function getRandomItem(list) {
             return list[Math.floor(Math.random() * list.length)];
         }
-
+        function generateRandomLetters(n, isUpperCase) {
+            const letters = isUpperCase ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' : 'abcdefghijklmnopqrstuvwxyz';
+            let result = '';
+            for (let i = 0; i < n; i++) result += letters.charAt(Math.floor(Math.random() * letters.length));
+            return result;
+        }
+        function getRandomPaddedInt(n) {
+            const max = Math.pow(10, n) - 1;
+            const min = Math.pow(10, n - 1);
+            return (Math.floor(Math.random() * (max - min + 1)) + min).toString().padStart(n, '0');
+        }
         function getRandomChineseName() {
-            const surnames = ["赵", "钱", "孙", "李", "周", "刘", "王"];
-            const commonGivenChars = [
-                "伟", "秀", "敏", "静", "丽", "强", "磊", "军", "洋", "杰", "婷", "浩", "婷", "欣",
-                "佳", "琪", "婧", "思", "鑫", "博", "宇", "轩", "涵", "宁", "瑶", "晨", "泽", "瑞"
-            ];
+            const surnames = ["赵","钱","孙","李","周","刘","王","陈","杨","黄","吴","郑"];
+            const chars = ["伟","秀","敏","静","丽","强","磊","军","洋","杰","婷","浩","欣","佳","琪","思","鑫","博","宇","轩","涵","宁","瑶","晨","泽","瑞"];
             const surname = getRandomItem(surnames);
             const len = Math.random() < 0.5 ? 1 : 2;
             let given = "";
-            for (let i = 0; i < len; i++) {
-                given += getRandomItem(commonGivenChars);
-            }
+            for (let i = 0; i < len; i++) given += getRandomItem(chars);
             return surname + given;
         }
-
-        function getRandomDateUsingRandomNumbers() {
-            const year = Math.floor(Math.random() * (2024 - 2020 + 1)) + 2020;
-            const month = String(Math.floor(Math.random() * 12) + 1).padStart(2, '0');
-            const day = String(Math.floor(Math.random() * 28) + 1).padStart(2, '0');
+        function getRandomDate() {
+            const year = getRandomInt(2023, 2026);
+            const month = String(getRandomInt(1, 12)).padStart(2, '0');
+            const day = String(getRandomInt(1, 28)).padStart(2, '0');
             return `${year}-${month}-${day}`;
         }
-
-        function getYesNo() {
-            return Math.random() < 0.5 ? '是' : '否';
+        function getThousands(min, max) {
+            return getRandomInt(min, max).toLocaleString('en-US');
         }
-
-        // 低饱和度填充色 (Excel 单元格高亮的常用色)
-        // 注意 inline !important: 用于覆盖 common() 里的 #disguised-content div{background:#FFF!important}
-        function getFilledColorCell() {
-            const palette = [
-                '#FFF2CC', // 浅黄
-                '#D9E1F2', // 浅蓝
-                '#E2EFDA', // 浅绿
-                '#FCE4D6', // 浅橙
-                '#F4CCCC', // 浅红
-                '#EDEDED'  // 浅灰
+        function getAppName() {
+            return getRandomItem(['番茄阅读','起点小说','番茄畅听','微信读书','QQ阅读','喜马拉雅','晋江文学','刺猬猫','百度阅读','飞卢小说','纵横中文','咪咕阅读','掌阅','书旗小说','七猫小说']);
+        }
+        function getStoreName() {
+            return getRandomItem(['App Store','华为应用市场','小米应用商店','OPPO','VIVO','应用宝','百度手机助手','Google Play','360手机助手','豌豆荚']);
+        }
+        function getChannelName() {
+            return getRandomItem(['抖音','快手','微信朋友圈','小红书','B站','百度SEM','OPPO广告','VIVO广告','今日头条','UC','微博','知乎','腾讯广告','巨量引擎','磁力金牛']);
+        }
+        function getPlatform() {
+            const list = [['iOS','#D9E1F2'],['Android','#E2EFDA'],['HarmonyOS','#FCE4D6']];
+            const [t, bg] = getRandomItem(list);
+            return fillCell(t, bg);
+        }
+        function getRating() {
+            const score = (Math.random()*1.5+3.5).toFixed(1);
+            const inner = `<span style="color:#e08e45 !important;">★</span> ${score}`;
+            if (parseFloat(score) >= 4.7) return fillCell(inner, '#FFEB9C');
+            return maybeFill(inner, 0.2);
+        }
+        function getStatusBadge() {
+            const list = [
+                ['正常',    '#C6EFCE', '#1f6e1f'],
+                ['运行中',  '#BDD7EE', '#1F4E79'],
+                ['推广中',  '#BDD7EE', '#1F4E79'],
+                ['待发布',  '#FFEB9C', '#7F6000'],
+                ['审核中',  '#E4D5F1', '#5E3A87'],
+                ['已暂停',  '#FFC7CE', '#9C0006']
             ];
-            // 30% 留白, 让整列不要太花
-            if (Math.random() < 0.3) return '';
-            const color = palette[Math.floor(Math.random() * palette.length)];
-            return `<div style="background-color:${color} !important;margin:-3px -10px;padding:3px 10px;">&nbsp;</div>`;
+            const [t, bg, fg] = getRandomItem(list);
+            return fillCell(`<span style="color:${fg} !important;font-weight:bold;">● ${t}</span>`, bg);
+        }
+        function getTrend() {
+            const up = Math.random() > 0.4;
+            const v = (Math.random()*30+0.5).toFixed(1);
+            return up
+                ? fillCell(`<span style="color:#1f6e1f !important;font-weight:bold;">▲ ${v}%</span>`, '#C6EFCE')
+                : fillCell(`<span style="color:#9C0006 !important;font-weight:bold;">▼ ${v}%</span>`, '#FFC7CE');
+        }
+        function getGrade() {
+            const list = [
+                ['S',  '#FFD966'], ['S+', '#FFC000'],
+                ['A',  '#C6E0B4'], ['A+', '#A9D08E'], ['A-', '#C6E0B4'],
+                ['B',  '#D9E1F2'], ['B+', '#BDD7EE'],
+                ['C',  '#F4CCCC']
+            ];
+            const [t, bg] = getRandomItem(list);
+            return fillCell(`<b>${t}</b>`, bg);
+        }
+        function getMoneyWan() {
+            return `¥${(Math.random()*999+10).toFixed(2)}万`;
         }
 
-        // 千分位货币
-        function getCurrency() {
-            const value = (Math.random() * 100000).toFixed(2);
-            const formatted = parseFloat(value).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-            return `¥${formatted}`;
+        // 整格背景填充 (用 -3px -10px 反向 margin 抵消 td padding, 覆盖整个单元格)
+        function fillCell(content, color) {
+            return `<div style="background-color:${color} !important;margin:-3px -10px;padding:3px 10px;">${content}</div>`;
         }
 
-        // 数据条 (Excel 的 in-cell bar chart)
-        function getProgressBar() {
-            const value = getRandomInt(5, 100);
+        // 概率性浅色填充, 模拟 Excel 条件格式的零散高亮
+        const LIGHT_PALETTE = ['#FFF2CC','#D9E1F2','#E2EFDA','#FCE4D6','#F4CCCC','#EDEDED','#EAD1DC'];
+        function maybeFill(content, prob = 0.22, palette) {
+            if (Math.random() > prob) return content;
+            const pool = palette || LIGHT_PALETTE;
+            return fillCell(content, pool[Math.floor(Math.random()*pool.length)]);
+        }
+
+        // 数据条 (Excel 的 in-cell bar)
+        function getProgressBar(min = 5, max = 100) {
+            const value = getRandomInt(min, max);
             const barColor = value > 70 ? '#4a90d9' : value > 30 ? '#7fb069' : '#e08e45';
             return `<div style="position:relative;background-color:#f0f0f0 !important;margin:-3px -10px;padding:0;height:18px;line-height:18px;">
                 <div style="background-color:${barColor} !important;height:100%;width:${value}%;opacity:0.7;"></div>
-                <div style="position:absolute;top:0;left:0;width:100%;text-align:center;font-size:11px;color:#000;background-color:transparent !important;">${value}%</div>
+                <div style="position:absolute;top:0;left:0;width:100%;text-align:center;font-size:11px;color:#000 !important;background-color:transparent !important;">${value}%</div>
             </div>`;
         }
 
-        switch (type) {
-            case 1:
-                return `${generateRandomLetters(2, true)}-${generateRandomLetters(2, true)}-${generateRandomLetters(2, true)}${getRandomPaddedInt(6)}`;
-            case 2:
-                return getRandomChineseName();
-            case 3:
-                return getRandomDateUsingRandomNumbers();
-            case 4:
-                return getRandomInt(1, 9999);
-            case 5:
-                return generateRandomLetters(1, true);
-            case 6:
-                return getFilledColorCell();
-            case 7:
-                return getYesNo();
-            case 8:
-                return getCurrency();
-            case 9:
-                return getProgressBar();
+        // 迷你柱状图 sparkline
+        function getMiniBars() {
+            const color = getRandomItem(['#4a90d9','#5e9c4a','#c47a30','#7a5dbf']);
+            let bars = '';
+            for (let i = 0; i < 7; i++) {
+                const h = getRandomInt(3, 14);
+                bars += `<rect x="${i*6+1}" y="${14-h}" width="4" height="${h}" fill="${color}" opacity="0.85"/>`;
+            }
+            return `<svg width="44" height="14" style="vertical-align:middle;">${bars}</svg>`;
+        }
+
+        // 迷你折线图
+        function getSparkline() {
+            const pts = [];
+            let y = getRandomInt(4, 11);
+            for (let i = 0; i < 8; i++) {
+                pts.push(`${i*6+1},${y}`);
+                y = Math.max(2, Math.min(12, y + getRandomInt(-3, 3)));
+            }
+            const color = getRandomItem(['#4a90d9','#5e9c4a','#c47a30']);
+            return `<svg width="44" height="14" style="vertical-align:middle;">
+                <polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.5"/>
+            </svg>`;
+        }
+
+        // 迷你饼图
+        function getMiniPie() {
+            const pct = getRandomInt(15, 85);
+            const palettes = [['#4a90d9','#dde7f0'],['#5e9c4a','#dfeada'],['#c47a30','#f0e1cf'],['#7a5dbf','#e4ddef']];
+            const [fg, bg] = getRandomItem(palettes);
+            const r = 7, cx = 8, cy = 8;
+            const angle = (pct / 100) * 360;
+            const rad = (angle - 90) * Math.PI / 180;
+            const endX = (cx + r * Math.cos(rad)).toFixed(2);
+            const endY = (cy + r * Math.sin(rad)).toFixed(2);
+            const largeArc = angle > 180 ? 1 : 0;
+            return `<svg width="16" height="16" style="vertical-align:middle;">
+                <circle cx="${cx}" cy="${cy}" r="${r}" fill="${bg}"/>
+                <path d="M ${cx} ${cy} L ${cx} ${cy-r} A ${r} ${r} 0 ${largeArc} 1 ${endX} ${endY} Z" fill="${fg}"/>
+            </svg>`;
+        }
+
+        // 迷你环形图 + 百分比文本
+        function getMiniDonut() {
+            const pct = getRandomInt(30, 95);
+            const color = getRandomItem(['#4a90d9','#5e9c4a','#c47a30','#b8485f']);
+            const C = 2 * Math.PI * 6;
+            const dash = ((pct/100) * C).toFixed(2);
+            const rest = (C - dash).toFixed(2);
+            return `<svg width="16" height="16" style="vertical-align:middle;" viewBox="0 0 18 18">
+                <circle cx="9" cy="9" r="6" fill="none" stroke="#e6e6e6" stroke-width="2.5"/>
+                <circle cx="9" cy="9" r="6" fill="none" stroke="${color}" stroke-width="2.5"
+                    stroke-dasharray="${dash} ${rest}" transform="rotate(-90 9 9)"/>
+            </svg><span style="font-size:10px;margin-left:3px;">${pct}%</span>`;
+        }
+
+        // 4 种样式, 每列对应一个生成函数
+        const styles = {
+            // 应用下载分析
+            app_download: [
+                () => maybeFill(`APP-${generateRandomLetters(3, true)}-${getRandomPaddedInt(5)}`, 0.15, ['#EDEDED']),
+                () => maybeFill(getAppName(), 0.2),
+                () => maybeFill(getStoreName(), 0.2),
+                () => getPlatform(),
+                () => {
+                    const n = getRandomInt(1000, 999999);
+                    const text = n.toLocaleString('en-US');
+                    return n > 500000 ? fillCell(text, '#FFEB9C') : maybeFill(text, 0.18);
+                },
+                () => getMiniBars(),
+                () => getRating(),
+                () => getStatusBadge(),
+                () => maybeFill(getRandomDate(), 0.12, ['#EDEDED'])
+            ],
+            // 转化率漏斗 (曝光 → 下载 → 注册 → 付费)
+            conversion_funnel: [
+                () => maybeFill(`PROM-${generateRandomLetters(2, true)}-${getRandomPaddedInt(4)}`, 0.15, ['#EDEDED']),
+                () => maybeFill(getChannelName(), 0.25),
+                () => maybeFill(getThousands(10000, 9999999), 0.18),
+                () => maybeFill(getThousands(500, 99999), 0.18),
+                () => getProgressBar(15, 75),
+                () => getProgressBar(8, 50),
+                () => getProgressBar(1, 22),
+                () => getSparkline(),
+                () => {
+                    const v = (Math.random()*5+0.5).toFixed(2);
+                    return parseFloat(v) >= 3 ? fillCell(v, '#C6EFCE') : parseFloat(v) < 1 ? fillCell(v, '#FFC7CE') : v;
+                }
+            ],
+            // 渠道占比 (饼图为主)
+            channel_share: [
+                () => maybeFill(getChannelName(), 0.25),
+                () => maybeFill(getThousands(1000, 999999), 0.2),
+                () => getMiniPie(),
+                () => {
+                    const p = (Math.random()*33+2).toFixed(1) + '%';
+                    return parseFloat(p) >= 25 ? fillCell(p, '#FFEB9C') : maybeFill(p, 0.15);
+                },
+                () => getTrend(),
+                () => getProgressBar(40, 95),
+                () => maybeFill(`¥${(Math.random()*100+5).toFixed(2)}`, 0.18),
+                () => getGrade(),
+                () => getStatusBadge()
+            ],
+            // KPI 看板 (混合: 柱图 + 环形图)
+            kpi_dashboard: [
+                () => maybeFill(`PD-${getRandomPaddedInt(4)}`, 0.15, ['#EDEDED']),
+                () => maybeFill(getRandomChineseName(), 0.22),
+                () => maybeFill(getThousands(5000, 999999), 0.2),
+                () => getMiniBars(),
+                () => getMiniDonut(),
+                () => getProgressBar(40, 100),
+                () => getTrend(),
+                () => maybeFill(getMoneyWan(), 0.22, ['#FFF2CC','#FFEB9C']),
+                () => getStatusBadge()
+            ]
+        };
+
+        const cols = styles[currentDataStyle];
+        const fn = cols[colIndex % cols.length];
+        return fn();
+    }
+
+    // ============ 大图表 (跨行跨列) ============
+    GM_addStyle(`
+        .excel-table .big-chart-cell {
+            background-color: #FAFAFA !important;
+            border: 1px solid #C0C0C0 !important;
+            vertical-align: middle !important;
+            text-align: center !important;
+            padding: 6px 4px !important;
+            white-space: normal !important;
+        }
+        .excel-table .big-chart-cell > * { background-color: transparent !important; }
+        .excel-table .big-chart-cell .big-chart-title {
+            font-size: 14px;
+            color: #444 !important;
+            margin-bottom: 8px;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+        }
+        .excel-table .big-chart-cell .big-chart-caption {
+            font-size: 11px;
+            color: #777 !important;
+            margin-top: 6px;
+            line-height: 1.6;
+        }
+    `);
+
+    let _chartRowIdx = 0;
+    let _chartNextAt = 2;
+    let _chartActive = null;
+
+    function resetBigChartState() {
+        _chartRowIdx = 0;
+        _chartNextAt = 2;
+        _chartActive = null;
+    }
+
+    function buildBigChartHtml() {
+        const rint = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+        const pick = (list) => list[Math.floor(Math.random() * list.length)];
+
+        // 柱状图: 7 天下载量 (600x160)
+        function bigBars() {
+            const color = pick(['#4a90d9','#5e9c4a','#c47a30','#7a5dbf']);
+            const days = ['一','二','三','四','五','六','日'];
+            const baseY = 130, chartH = 110, barW = 50, gap = 30, leftPad = 50;
+            let bars = '', vals = '', labels = '', grid = '';
+            for (let g = 0; g < 4; g++) {
+                const y = baseY - (g * chartH / 3);
+                grid += `<line x1="${leftPad-5}" y1="${y}" x2="595" y2="${y}" stroke="#eee" stroke-width="1"/>`;
+                grid += `<text x="${leftPad-10}" y="${y+4}" text-anchor="end" font-size="10" fill="#aaa">${Math.round((g/3)*100)}</text>`;
+            }
+            for (let i = 0; i < 7; i++) {
+                const v = rint(25, 95);
+                const h = (v / 100) * chartH;
+                const x = leftPad + i * (barW + gap);
+                const y = baseY - h;
+                bars += `<rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="${color}" opacity="0.88" rx="2"/>`;
+                vals += `<text x="${x + barW/2}" y="${y - 5}" text-anchor="middle" font-size="11" fill="#555" font-weight="bold">${v}</text>`;
+                labels += `<text x="${x + barW/2}" y="148" text-anchor="middle" font-size="11" fill="#888">周${days[i]}</text>`;
+            }
+            const growth = (Math.random()*15+2).toFixed(1);
+            return `<div class="big-chart-title">近7日下载量趋势 (万次)</div>
+                <svg width="600" height="160" viewBox="0 0 600 160" style="max-width:100%;">
+                    ${grid}${bars}${vals}${labels}
+                </svg>
+                <div class="big-chart-caption">周环比 <span style="color:#1f6e1f;">▲ ${growth}%</span>  ·  日均下载 ${rint(35, 85)} 万次  ·  累计 ${rint(280, 680)} 万次</div>`;
+        }
+
+        // 折线图: 14日转化率趋势 (600x160)
+        function bigLine() {
+            const color = pick(['#4a90d9','#5e9c4a','#c47a30']);
+            const N = 14;
+            const baseY = 130, chartH = 110, leftPad = 50, rightPad = 30;
+            const chartW = 600 - leftPad - rightPad;
+            const xStep = chartW / (N - 1);
+            const ys = [];
+            let y = rint(40, 70);
+            for (let i = 0; i < N; i++) {
+                ys.push(y);
+                y = Math.max(20, Math.min(105, y + rint(-12, 14)));
+            }
+            const scaleY = (val) => baseY - (val / 110) * chartH;
+            const pts = ys.map((yy, i) => `${leftPad + i * xStep},${scaleY(yy).toFixed(1)}`).join(' ');
+            const areaPts = `${leftPad},${baseY} ${pts} ${leftPad + (N-1) * xStep},${baseY}`;
+            let dots = '', xLabels = '', grid = '';
+            for (let g = 0; g < 4; g++) {
+                const yy = baseY - (g * chartH / 3);
+                grid += `<line x1="${leftPad-5}" y1="${yy}" x2="${600-rightPad}" y2="${yy}" stroke="#eee" stroke-width="1"/>`;
+                grid += `<text x="${leftPad-10}" y="${yy+4}" text-anchor="end" font-size="10" fill="#aaa">${Math.round((g/3)*110)}%</text>`;
+            }
+            ys.forEach((yy, i) => {
+                const x = leftPad + i * xStep;
+                dots += `<circle cx="${x}" cy="${scaleY(yy).toFixed(1)}" r="3" fill="#fff" stroke="${color}" stroke-width="2"/>`;
+                if (i % 2 === 0) xLabels += `<text x="${x}" y="148" text-anchor="middle" font-size="10" fill="#888">D${String(i+1).padStart(2,'0')}</text>`;
+            });
+            const avg = (ys.reduce((s, x) => s + x, 0) / ys.length).toFixed(1);
+            const peak = Math.max(...ys);
+            return `<div class="big-chart-title">14日转化率趋势</div>
+                <svg width="600" height="160" viewBox="0 0 600 160" style="max-width:100%;">
+                    ${grid}
+                    <polygon points="${areaPts}" fill="${color}" opacity="0.18"/>
+                    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2.5"/>
+                    ${dots}${xLabels}
+                </svg>
+                <div class="big-chart-caption">均值 ${avg}%  ·  峰值 ${peak}%  ·  趋势 <span style="color:#1f6e1f;">▲ 稳步上升</span>  ·  样本量 ${rint(8000, 99000).toLocaleString('en-US')}</div>`;
+        }
+
+        // 饼图: 渠道占比 (180px 饼 + 侧边图例)
+        function bigPie() {
+            const cx = 90, cy = 90, r = 75;
+            const segs = [
+                { pct: rint(28, 38), color: '#4a90d9', label: pick(['抖音','腾讯广告','巨量引擎']) },
+                { pct: rint(20, 26), color: '#5e9c4a', label: pick(['快手','OPPO','应用宝']) },
+                { pct: rint(14, 20), color: '#c47a30', label: pick(['微信','百度SEM','华为']) },
+                { pct: rint(8, 14),  color: '#7a5dbf', label: pick(['小红书','B站','UC']) }
+            ];
+            const total = segs.reduce((s, x) => s + x.pct, 0);
+            if (total < 100) segs.push({ pct: 100 - total, color: '#bbb', label: '其他' });
+
+            let startAngle = 0, paths = '';
+            segs.forEach(s => {
+                const angle = (s.pct / 100) * 360;
+                const endAngle = startAngle + angle;
+                const sr = (startAngle - 90) * Math.PI / 180;
+                const er = (endAngle - 90) * Math.PI / 180;
+                const x1 = cx + r * Math.cos(sr), y1 = cy + r * Math.sin(sr);
+                const x2 = cx + r * Math.cos(er), y2 = cy + r * Math.sin(er);
+                const largeArc = angle > 180 ? 1 : 0;
+                paths += `<path d="M ${cx} ${cy} L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z" fill="${s.color}" stroke="#fff" stroke-width="1.5"/>`;
+                startAngle = endAngle;
+            });
+
+            const legendRows = segs.map(s => `
+                <div style="display:flex;align-items:center;font-size:12px;margin:5px 0;background-color:transparent !important;">
+                    <span style="display:inline-block;width:12px;height:12px;background:${s.color} !important;margin-right:8px;border-radius:2px;"></span>
+                    <span style="min-width:72px;color:#555 !important;">${s.label}</span>
+                    <span style="font-weight:bold;color:#222 !important;min-width:42px;text-align:right;">${s.pct}%</span>
+                    <span style="margin-left:10px;color:#999 !important;font-size:10px;">${rint(80, 990).toLocaleString('en-US')}</span>
+                </div>`).join('');
+
+            return `<div class="big-chart-title">渠道占比分析 (本周)</div>
+                <div style="display:inline-flex;align-items:center;justify-content:center;gap:40px;background-color:transparent !important;">
+                    <svg width="180" height="180" viewBox="0 0 180 180">${paths}</svg>
+                    <div style="text-align:left;background-color:transparent !important;">${legendRows}</div>
+                </div>`;
+        }
+
+        // 环形图: 健康度评分 (160px + 侧边指标)
+        function bigDonut() {
+            const pct = rint(58, 94);
+            const color = pct >= 80 ? '#1f6e1f' : pct >= 65 ? '#4a90d9' : '#c47a30';
+            const r = 60;
+            const C = 2 * Math.PI * r;
+            const dash = ((pct/100) * C).toFixed(2);
+            const rest = (C - dash).toFixed(2);
+            const rating = pct >= 85 ? '优秀' : pct >= 70 ? '良好' : pct >= 60 ? '正常' : '需关注';
+
+            const metrics = [
+                { label: '日活 (DAU)', value: rint(8000, 99999).toLocaleString('en-US'), trend: (Math.random()*15+0.5).toFixed(1) },
+                { label: '留存率',     value: rint(45, 88) + '%',                          trend: (Math.random()*5+0.2).toFixed(1) },
+                { label: 'ARPU',       value: '¥' + (Math.random()*50+5).toFixed(2),       trend: (Math.random()*10+0.5).toFixed(1) },
+                { label: '次日留存',   value: rint(30, 70) + '%',                          trend: (Math.random()*8+0.2).toFixed(1) }
+            ];
+            const metricRows = metrics.map(m => `
+                <div style="display:flex;align-items:center;font-size:12px;margin:4px 0;background-color:transparent !important;">
+                    <span style="color:#777 !important;min-width:70px;">${m.label}</span>
+                    <span style="font-weight:bold;color:#222 !important;min-width:90px;">${m.value}</span>
+                    <span style="color:#1f6e1f !important;font-size:11px;">▲ ${m.trend}%</span>
+                </div>`).join('');
+
+            return `<div class="big-chart-title">综合健康度评分</div>
+                <div style="display:inline-flex;align-items:center;justify-content:center;gap:40px;background-color:transparent !important;">
+                    <svg width="160" height="160" viewBox="0 0 160 160">
+                        <circle cx="80" cy="80" r="${r}" fill="none" stroke="#ececec" stroke-width="14"/>
+                        <circle cx="80" cy="80" r="${r}" fill="none" stroke="${color}" stroke-width="14"
+                            stroke-dasharray="${dash} ${rest}" transform="rotate(-90 80 80)" stroke-linecap="round"/>
+                        <text x="80" y="86" text-anchor="middle" font-size="36" font-weight="bold" fill="${color}">${pct}</text>
+                        <text x="80" y="105" text-anchor="middle" font-size="11" fill="#888">/ 100 分</text>
+                    </svg>
+                    <div style="text-align:left;background-color:transparent !important;">
+                        <div style="font-size:14px;color:${color} !important;font-weight:bold;margin-bottom:8px;background-color:transparent !important;">综合评级: ${rating}</div>
+                        ${metricRows}
+                    </div>
+                </div>`;
+        }
+
+        const chartByStyle = {
+            app_download:      { html: bigBars(),  colspan: 10, rowspan: 10 },
+            conversion_funnel: { html: bigLine(),  colspan: 10, rowspan: 10 },
+            channel_share:     { html: bigPie(),   colspan: 10, rowspan: 10 },
+            kpi_dashboard:     { html: bigDonut(), colspan: 10, rowspan: 10 }
+        };
+        return chartByStyle[currentDataStyle] || chartByStyle.app_download;
+    }
+
+    function appendEmptyColsForRow($tr) {
+        _chartRowIdx++;
+
+        // 当前有跨行图表占位 → 跳过被占用的列
+        if (_chartActive) {
+            const skip = _chartActive.skip;
+            for (let i = 0; i < config.emptyCols; i++) {
+                if (skip.includes(i)) continue;
+                let tdContent = "";
+                if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
+                    tdContent = generateRandomContent(i);
+                }
+                $tr.append($(`<td>${tdContent}</td>`));
+            }
+            _chartActive.rowsLeft--;
+            if (_chartActive.rowsLeft <= 0) {
+                _chartActive = null;
+                _chartNextAt = _chartRowIdx + 2;  // 1 行间隔后再插下一个
+            }
+            return;
+        }
+
+        // 该插入新图表 (统一从 K 列起, 占 10x10)
+        if (_chartRowIdx >= _chartNextAt) {
+            const chart = buildBigChartHtml();
+            // K 列 = loop i=9 (B=0, C=1, ..., K=9)
+            const startCol = 9;
+            const skip = [startCol];
+            for (let c = startCol + 1; c < startCol + chart.colspan; c++) skip.push(c);
+
+            _chartActive = { skip, rowsLeft: chart.rowspan - 1 };
+
+            for (let i = 0; i < config.emptyCols; i++) {
+                if (i === startCol) {
+                    $tr.append($(`<td class="big-chart-cell" colspan="${chart.colspan}" rowspan="${chart.rowspan}">${chart.html}</td>`));
+                    continue;
+                }
+                if (skip.includes(i)) continue;
+                let tdContent = "";
+                if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
+                    tdContent = generateRandomContent(i);
+                }
+                $tr.append($(`<td>${tdContent}</td>`));
+            }
+
+            if (_chartActive.rowsLeft <= 0) {
+                _chartActive = null;
+                _chartNextAt = _chartRowIdx + 2;
+            }
+            return;
+        }
+
+        // 普通行
+        for (let i = 0; i < config.emptyCols; i++) {
+            let tdContent = "";
+            if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
+                tdContent = generateRandomContent(i);
+            }
+            $tr.append($(`<td>${tdContent}</td>`));
         }
     }
 
@@ -1193,13 +1578,7 @@
                 $navCell.text('(未找到翻页按钮)');
             }
             $navRow.append($navCell);
-            for (let i = 0; i < config.emptyCols; i++) {
-                let tdContent = "";
-                if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
-                    tdContent = generateRandomContent(i);
-                }
-                $navRow.append($(`<td>${tdContent}</td>`));
-            }
+            appendEmptyColsForRow($navRow);
             $tbody.append($navRow);
         }
 
@@ -1225,6 +1604,7 @@
 
             const $tbody = $(".excel-table > tbody");
             $tbody.empty();
+            resetBigChartState();
 
             // 读取容器原始宽度 (微信读书固定 798), 准备缩放
             const origStyleAttr = $container.attr('style') || '';
@@ -1252,28 +1632,16 @@
 
             const $firstRow = $('<tr></tr>');
             $firstRow.append($('<td></td>').text(1));
-            const $canvasCell = $('<td class="weread-canvas-cell"></td>').attr('rowspan', canvasRowSpan);
+            const $canvasCell = $('<td class="weread-canvas-cell disguised-content-cell"></td>').attr('rowspan', canvasRowSpan);
             $scaleWrapper.appendTo($canvasCell);
             $firstRow.append($canvasCell);
-            for (let i = 0; i < config.emptyCols; i++) {
-                let tdContent = "";
-                if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
-                    tdContent = generateRandomContent(i);
-                }
-                $firstRow.append($(`<td>${tdContent}</td>`));
-            }
+            appendEmptyColsForRow($firstRow);
             $tbody.append($firstRow);
 
             for (let r = 2; r <= canvasRowSpan; r++) {
                 const $tr = $('<tr></tr>');
                 $tr.append($('<td></td>').text(r));
-                for (let i = 0; i < config.emptyCols; i++) {
-                    let tdContent = "";
-                    if (config.enableExcelRandomPopulate && i < config.maxExcelRandomPopulateCol) {
-                        tdContent = generateRandomContent(i);
-                    }
-                    $tr.append($(`<td>${tdContent}</td>`));
-                }
+                appendEmptyColsForRow($tr);
                 $tbody.append($tr);
             }
 
@@ -1295,6 +1663,7 @@
         }, function () {
             const $tbody = $(".excel-table > tbody");
             $tbody.empty();
+            resetBigChartState();
             const $errRow = $('<tr></tr>');
             $errRow.append($('<td></td>').text(1));
             $errRow.append($('<td style="color:#c33;padding:10px !important;">canvas 加载超时, 请刷新页面重试. 如多次失败, 检查 F12 控制台日志.</td>'));
@@ -1319,11 +1688,13 @@
         }
     });
 
-    // 老板键 R: 切换正文列 (B列) 的可见性, 起点/番茄/微信读书通用
-    // 通过 body 上的 class 控制, 动态新增的行也会自动生效
+    // 老板键 R: 切换正文列 (A列) 的可见性, 起点/番茄/微信读书通用
+    // 通过 body 上的 class 控制, 动态新增的行也会自动生效.
+    // 用 .disguised-content-cell 而不是 nth-child(2) -- 微信读书 canvas 的 rowspan 会让
+    // 后续行的 nth-child(2) 错位指向右侧 B 列假数据格.
     GM_addStyle(`
-        body.boss-mode .excel-table > tbody > tr > td:nth-child(2),
-        body.boss-mode .excel-table > tbody > tr > td:nth-child(2) * {
+        body.boss-mode .excel-table > tbody > tr > td.disguised-content-cell,
+        body.boss-mode .excel-table > tbody > tr > td.disguised-content-cell * {
             visibility: hidden !important;
         }
     `);
