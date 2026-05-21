@@ -62,6 +62,36 @@
 
     const KEY_CONFIG = "KEY_CONFIG_MINI";
 
+    // 微信读书文字缓存. 流程:
+    //   phase 1 (原生页 + 白色遮罩) 用 MutationObserver 抓 .wr_absolute[class*="ccn-"]
+    //     的 (x, y, char) -> writeWereadCache(sessionStorage) -> location.reload()
+    //   phase 2 (伪装页) readWereadCache -> 立刻删除 -> 命中则直接渲染, 否则回到 phase 1
+    // 用 sessionStorage 单次跨 reload 传递: 每次 reload 都强制重新抓取, 不依赖 URL 匹配,
+    // 彻底消除 SPA 切章节命中旧缓存的问题. 关闭标签页时 sessionStorage 自动清空.
+    const WEREAD_CACHE_KEY = "WEREAD_TEXTS_PAYLOAD";
+
+    function readWereadCache() {
+        try {
+            const raw = sessionStorage.getItem(WEREAD_CACHE_KEY);
+            // 一次性消费: 读出后立刻删除, 下次 reload 必须重新抓取
+            sessionStorage.removeItem(WEREAD_CACHE_KEY);
+            if (!raw) return null;
+            const data = JSON.parse(raw);
+            if (!data || !data.chars || data.chars.length === 0) return null;
+            return data;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function writeWereadCache(data) {
+        try {
+            sessionStorage.setItem(WEREAD_CACHE_KEY, JSON.stringify(data));
+        } catch (e) {
+            printLog('warn', '写文字缓存失败: ' + e.message);
+        }
+    }
+
     function printLog(...args) {
         let level = 'info';
         if (typeof args[0] === 'string' && ['info', 'warn', 'error'].includes(args[0])) {
@@ -1496,17 +1526,21 @@
      * 微信读书
      * 正文是 canvas 像素无法提取文字, 整体策略: 把 canvas 容器 detach 后塞进 B 列单元格,
      * 用 rowspan 让它跨越 N 行, 序号与右侧假数据列正常排布.
+     *
+     * 文字层 (用于 Ctrl+F 搜索 + boss 模式可隐藏): 由 phase 1 wereadHarvestPhase()
+     * 在原生页面提前抓 .wr_absolute[class*="ccn-"] 缓存. 这里 phase 2 用 cache.chars
+     * 在 canvas rowspan 之后追加文字行.
      */
-    function weread() {
-        // 微信读书根据 window.innerHeight 决定画多少 canvas, 小屏上只画前 2 段就停.
-        // 把 innerHeight 覆盖成一个大值, 强制 weread 一次画完所有 canvas.
+    function weread(cache) {
+        // 微信读书用 window.innerHeight 当渲染范围上限, span/canvas 只在 y < innerHeight
+        // 内生成. 必须设大到能覆盖整章 (实测一章可达 y=8000+, 这里给到 50000 余量足够).
         // 注意: 不能改 window 本身, 只能用 defineProperty 覆盖 getter.
         try {
             Object.defineProperty(window, 'innerHeight', {
                 configurable: true,
-                get: function () { return 5000; }
+                get: function () { return 50000; }
             });
-            printLog('已覆盖 window.innerHeight=5000 以强制 canvas 完整渲染');
+            printLog('已覆盖 window.innerHeight=50000 以强制 canvas 完整渲染');
         } catch (e) {
             printLog('warn', '覆盖 window.innerHeight 失败: ' + e.message);
         }
@@ -1522,14 +1556,17 @@
             width: 1200px !important;
             height: 20000px !important;
             visibility: visible !important;
-            pointer-events: none;
+            /* 不能加 pointer-events:none, 否则伪装页 nav 按钮 click 转发到原生按钮也会被吞 */
         }
         /* 伪装层始终在最上面 */
         #disguised-page { z-index: 100000; }
 
-        .readerTopBar, .readerControls, .readerFooter, .readerNotePanel,
+        .readerTopBar, .readerControls, .readerNotePanel,
         .readerCatalog, .reader-font-control-panel-wrapper,
         .wr_dialog, .arco-tooltip, .wr_tooltip_item { display: none !important; }
+        /* 注意: .readerFooter 不能 display:none, 否则里面的"下一章"按钮 click handler
+           会因为父级不可见而被 Vue 内部短路, 哪怕 .click() 也不触发路由跳转.
+           #app 已经被推到 -100000px 视觉上看不见, 所以不会泄露阅读内容. */
 
         .excel-table tbody td, .excel-table tbody td p { font-family: unset; }
         /* 微信读书 canvas 单元格无视全局 B 列宽度, 始终贴合 canvas. 用 wereadCanvasScale 调整 */
@@ -1606,7 +1643,7 @@
                 if (fullyPainted || (basicReady && stableCount >= 3 && attempts >= 5)) {
                     clearInterval(timer);
                     printLog(`canvas 就绪, 容器高 ${totalHeight}px, 已绘制覆盖 ${canvasCoverage}px, 共 ${$canvases.length} 张`);
-                    onReady($container, totalHeight);
+                    onReady($container, totalHeight, canvasCoverage);
                 } else if (Date.now() - startedAt > maxWaitMs) {
                     clearInterval(timer);
                     printLog("error", `等待 canvas 渲染超时, 最后状态: container=${$container.length}, canvases=${$canvases.length}, height=${totalHeight}, coverage=${canvasCoverage}`);
@@ -1616,26 +1653,10 @@
         }
 
         function buildNavRow($tbody, rowIndex) {
-            const $prevBtnSrc = $('.readerContentHeader .readerHeaderButton').first();
-            const $nextBtnSrc = $('.readerFooter .readerFooter_button').first();
-            printLog(`查找翻页按钮: 上一章=${$prevBtnSrc.length}, 下一章=${$nextBtnSrc.length}`);
-
             const $navRow = $('<tr></tr>');
             $navRow.append($('<td></td>').text(rowIndex));
             const $navCell = $(`<td class="weread-nav-cell"></td>`);
-            if ($prevBtnSrc.length) {
-                const $prevBtn = $('<button>上一章</button>');
-                $prevBtn.on('click', function () { $prevBtnSrc[0].click(); });
-                $navCell.append($prevBtn);
-            }
-            if ($nextBtnSrc.length) {
-                const $nextBtn = $('<button>下一章</button>');
-                $nextBtn.on('click', function () { $nextBtnSrc[0].click(); });
-                $navCell.append($nextBtn);
-            }
-            if (!$prevBtnSrc.length && !$nextBtnSrc.length) {
-                $navCell.text('(未找到翻页按钮)');
-            }
+            $navCell.text('请通过键盘方向键 → 跳转下一章节');
             $navRow.append($navCell);
             appendEmptyColsForRow($navRow);
             $tbody.append($navRow);
@@ -1653,12 +1674,42 @@
             printLog(`刷新标题: 章节="${chapterTitle}", 书名="${bookTitle}"`);
         }
 
-        waitForCanvas(15000, function ($container, canvasTotalHeight) {
+        // 把 phase 1 抓到的字符列表 (按 y, x 聚类成行) 追加到 canvas rowspan 之后.
+        // 这样 Ctrl+F 可以搜到完整正文, 同时不影响 canvas 显示的真实视觉.
+        // 老板键 R 隐藏 .disguised-content-cell 也会一起隐藏文字行.
+        function appendCachedText(chars) {
+            if (!chars || chars.length === 0) {
+                printLog('warn', '没有缓存文字可追加 (phase 1 没抓到, 或缓存为空)');
+                return;
+            }
+            const sorted = chars.slice().sort(function (a, b) {
+                if (Math.abs(a.y - b.y) < 5) return a.x - b.x;
+                return a.y - b.y;
+            });
+            const lines = [];
+            let cur = [sorted[0]];
+            for (let i = 1; i < sorted.length; i++) {
+                if (Math.abs(sorted[i].y - cur[0].y) < 5) {
+                    cur.push(sorted[i]);
+                } else {
+                    lines.push(cur.map(function (c) { return c.text; }).join(''));
+                    cur = [sorted[i]];
+                }
+            }
+            if (cur.length) lines.push(cur.map(function (c) { return c.text; }).join(''));
+            setExcelLines(lines, true);
+            printLog(`已追加 ${lines.length} 行缓存文字到 excel`);
+        }
+
+        waitForCanvas(15000, function ($container, canvasTotalHeight, canvasPaintedHeight) {
             // canvas 就绪 = Vue 渲染完成, 此时读标题最稳
             refreshTitleFromDOM();
             const rowHeight = 22;
             const scale = config.wereadCanvasScale || 1;
-            const scaledCanvasHeight = Math.ceil(canvasTotalHeight * scale);
+            // 用实际绘制覆盖高度而非容器声明高度 — 后者会留下大段空白下不去看见文字.
+            // 实际绘制不到时回退到容器高度避免裁剪.
+            const effectiveCanvasHeight = canvasPaintedHeight > 100 ? canvasPaintedHeight : canvasTotalHeight;
+            const scaledCanvasHeight = Math.ceil(effectiveCanvasHeight * scale);
             const canvasRowSpan = Math.max(5, Math.ceil(scaledCanvasHeight / rowHeight));
 
             const $tbody = $(".excel-table > tbody");
@@ -1705,7 +1756,47 @@
                 $tbody.append($tr);
             }
 
-            buildNavRow($tbody, canvasRowSpan + 1);
+            // 用缓存的字符在 canvas 下方追加文字行 (供 Ctrl+F 搜索), 然后再画 nav 行
+            try {
+                appendCachedText(cache && cache.chars);
+            } catch (e) {
+                printLog('warn', '追加缓存文字失败 (不影响 canvas 部分): ' + e.message);
+            }
+            buildNavRow($tbody, getExcelLastIndex() + 1);
+
+            // 章节切换检测: 多路触发, 任意一路命中就 reload, phase 1 重新抓取.
+            // 1) 键盘左右方向键 = weread 内置上一章/下一章快捷键
+            // 2) URL 变化 (popstate / hashchange / pushState polling)
+            // 3) DOM 出现新的 wr_canvasContainer (兜底, 比如点 nav 按钮触发的)
+            let reloadScheduled = false;
+            function scheduleReload(reason) {
+                if (reloadScheduled) return;
+                reloadScheduled = true;
+                printLog(`检测到章节切换 (${reason}), 刷新页面重新抓取文字`);
+                setTimeout(function () { location.reload(); }, 200);
+            }
+
+            const onArrowKey = function (event) {
+                if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                    const tag = (event.target && event.target.tagName) || '';
+                    if (tag === 'INPUT' || tag === 'TEXTAREA' || (event.target && event.target.isContentEditable)) return;
+                    scheduleReload('方向键 ' + event.key);
+                }
+            };
+            document.addEventListener('keydown', onArrowKey, true);
+
+            const initialHref = location.href;
+            window.addEventListener('popstate', function () {
+                if (location.href !== initialHref) scheduleReload('popstate');
+            });
+            window.addEventListener('hashchange', function () {
+                if (location.href !== initialHref) scheduleReload('hashchange');
+            });
+            // pushState/replaceState 不触发任何事件, 只能轮询比较 href
+            const hrefPoll = setInterval(function () {
+                if (reloadScheduled) { clearInterval(hrefPoll); return; }
+                if (location.href !== initialHref) scheduleReload('href poll');
+            }, 500);
 
             const reRenderObserver = new MutationObserver(function () {
                 const $newContainer = $('.app_content .wr_canvasContainer').not($canvasCell.find('.wr_canvasContainer'));
@@ -1714,8 +1805,7 @@
                     const heightMatch = styleAttr.match(/height:\s*(\d+)px/i);
                     const newHeight = heightMatch ? parseInt(heightMatch[1]) : 0;
                     if (newHeight > 100) {
-                        printLog("检测到章节切换, 刷新页面");
-                        setTimeout(function () { location.reload(); }, 200);
+                        scheduleReload('新 canvasContainer');
                     }
                 }
             });
@@ -1734,6 +1824,217 @@
             $tbody.append($errRow);
             buildNavRow($tbody, 2);
         });
+    }
+
+    /**
+     * 微信读书 phase 1: 在原生页面累积抓取 .wr_absolute[class*="ccn-"] span 的字符,
+     * 不调用 common() (否则伪装层会把 #app 推离视口, weread 探测高度异常会停止渲染),
+     * 仅用全屏白色遮罩覆盖原生页面避免暴露阅读内容.
+     *
+     * 这些 span 是 weread 渲染流水线里的 transient char: 摆好位置 → canvas 画 → span 销毁.
+     * 必须在销毁前用 MutationObserver 持续累积; 等 canvas 一旦画完去查 DOM 就是 0 个.
+     *
+     * 抓完后 sessionStorage 写一次性 payload + location.reload() 进入 phase 2.
+     */
+    function wereadHarvestPhase() {
+        printLog('phase 1: 在原生页面抓取 ccn-* 文字, 完成后 reload 进入伪装模式');
+
+        // (x, y, char) 累积去重. key = "x_y_char" 避免重复采集同一个 span.
+        // 提前到函数最顶端创建 + 挂 observer, 哪怕一行 mask DOM op 也不能比它先,
+        // 否则 weread 第一批同步 append+remove span 流就漏抓了.
+        const charMap = new Map();
+
+        function captureSpan(span) {
+            const tf = (span.style && span.style.transform) || '';
+            const m = tf.match(/translate\(\s*(-?[\d.]+)px[,\s]+(-?[\d.]+)px/);
+            if (!m) return;
+            const x = parseFloat(m[1]);
+            const y = parseFloat(m[2]);
+            const text = (span.textContent || '');
+            if (!text) return;
+            const key = x.toFixed(1) + '_' + y.toFixed(1) + '_' + text;
+            if (!charMap.has(key)) charMap.set(key, { x: x, y: y, text: text });
+        }
+
+        // 处理一个 mutation 涉及到的节点:
+        //  - element: 自身或子树命中 ccn-* 就抓 (覆盖 addedNodes 路径)
+        //  - text node: 走 parentElement 找 span (覆盖 characterData 路径,
+        //    weread 可能复用 span 改写 textContent)
+        function processNode(node) {
+            if (!node) return;
+            if (node.nodeType === 3) {
+                node = node.parentElement;
+                if (!node) return;
+            }
+            if (node.nodeType !== 1) return;
+            if (node.matches && node.matches('.wr_absolute[class*="ccn-"]')) {
+                captureSpan(node);
+            }
+            if (node.querySelectorAll) {
+                const nested = node.querySelectorAll('.wr_absolute[class*="ccn-"]');
+                for (let i = 0; i < nested.length; i++) captureSpan(nested[i]);
+            }
+        }
+
+        // 兜底: 扫一次当前 DOM (节点池复用、首次进入时已存在的 span 等)
+        function harvestOnce() {
+            const spans = document.querySelectorAll('.wr_absolute[class*="ccn-"]');
+            for (let i = 0; i < spans.length; i++) captureSpan(spans[i]);
+        }
+
+        // 从 MutationRecord 直接读 addedNodes — 这是关键: 哪怕 span 已被同步移除,
+        // record 仍引用着原 DOM 对象, transform/textContent 完整可读.
+        // 同时观察 attribute/characterData 变化, 兜底 weread 复用同一 span 改写内容的情况.
+        const mo = new MutationObserver(function (mutations) {
+            for (let i = 0; i < mutations.length; i++) {
+                const mut = mutations[i];
+                if (mut.type === 'childList' && mut.addedNodes) {
+                    for (let j = 0; j < mut.addedNodes.length; j++) {
+                        processNode(mut.addedNodes[j]);
+                    }
+                } else if (mut.target) {
+                    processNode(mut.target);
+                }
+            }
+        });
+        mo.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class'],
+            characterData: true,
+            characterDataOldValue: false
+        });
+        harvestOnce();
+
+        // 撑大 innerHeight 到 50000 (weread 只在 y < innerHeight 内生成 span,
+        // 实测一章 y 可达 8000+; 给 50000 余量足够), 强制一次画完整章
+        try {
+            Object.defineProperty(window, 'innerHeight', {
+                configurable: true,
+                get: function () { return 50000; }
+            });
+            printLog('phase 1: 已覆盖 window.innerHeight=50000');
+        } catch (e) {
+            printLog('warn', 'phase 1: 覆盖 innerHeight 失败 ' + e.message);
+        }
+
+        // 全屏白色遮罩 + "文档打开中" 文字, 盖住原生页面避免泄露
+        const $mask = $(`
+            <div id="nd-harvest-mask" style="
+                position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+                background: #FFF; z-index: 999999;
+                display: flex; align-items: center; justify-content: center;
+                font-family: 'Microsoft YaHei', sans-serif; color: #444; font-size: 16px;
+                user-select: none;
+            ">
+                <div style="text-align: center;">
+                    <div style="font-size: 48px; margin-bottom: 16px;">📄</div>
+                    <div id="nd-harvest-status" style="font-weight: bold;">文档打开中</div>
+                    <div id="nd-harvest-detail" style="font-size: 12px; color: #999; margin-top: 8px;"></div>
+                </div>
+            </div>
+        `);
+        $mask.appendTo('body');
+        const $detail = $mask.find('#nd-harvest-detail');
+
+        document.title = '工作簿1';
+
+        let lastSize = 0;
+        let stableCount = 0;
+        let pollAttempts = 0;
+        let noSpanCount = 0;             // 连续抓不到 ccn-* span 的次数
+        const maxAttempts = 150;          // 150 * 200ms = 30s 上限 (scroll sweep 需要时间)
+        const stableThreshold = 8;        // 连续 8 次 (1.6s) 不增长 = 稳定
+        // 早退条件: sweep 走完后还连续 5 次 (1s) 完全抓不到任何 ccn-* span,
+        // 说明 weread 这一章用纯 canvas 渲染, 不需要文字层, 直接进入伪装模式.
+        const noSpanThreshold = 5;
+
+        // weread 用 IntersectionObserver 按 passage-wrapper 分批渲染 span (即使 innerHeight=50000
+        // 也只覆盖 window.innerHeight, viewport clientHeight 没被骗到), 必须扫一遍滚动才能触发全章渲染.
+        // sweep: 每 200ms 滚 800px, 直到底部. 期间 mo + interval 同步累积字符.
+        let sweepDone = false;
+        let sweepY = 0;
+        function performScrollSweep() {
+            // weread 滚的是 .readerContent / window 还是某个内部容器, 实测 window 滚就能触发
+            const docH = Math.max(
+                document.documentElement.scrollHeight,
+                document.body.scrollHeight
+            );
+            sweepY += 800;
+            window.scrollTo(0, sweepY);
+            // 也对常见容器 dispatch (兜底)
+            const $reader = $('.readerContent, #routerView, #app');
+            $reader.each(function () { this.scrollTop = sweepY; });
+            if (sweepY >= docH + 1000) {
+                sweepDone = true;
+                window.scrollTo(0, 0);
+                printLog(`phase 1: scroll sweep 完成, docH=${docH}px`);
+            }
+        }
+        const sweepTimer = setInterval(function () {
+            if (!sweepDone) performScrollSweep();
+        }, 200);
+
+        const timer = setInterval(function () {
+            pollAttempts++;
+            harvestOnce();
+            const size = charMap.size;
+            $detail.text(`已采集 ${size} 字 · 第 ${pollAttempts}/${maxAttempts} 次`);
+
+            if (size === lastSize && size > 0) {
+                stableCount++;
+            } else {
+                stableCount = 0;
+            }
+            lastSize = size;
+
+            // 当前 DOM 里完全没有 ccn-* span 时计数, 累积到阈值就早退
+            // (注意是看实时 DOM, 不是 charMap.size — 防止"曾经抓到过几个又消失"误判)
+            const liveCount = document.querySelectorAll('.wr_absolute[class*="ccn-"]').length;
+            if (liveCount === 0) noSpanCount++; else noSpanCount = 0;
+
+            if (pollAttempts === 1 || pollAttempts % 5 === 0) {
+                printLog(`harvest: 已抓 ${size} 字, stable=${stableCount}, live=${liveCount}, attempt=${pollAttempts}`);
+            }
+
+            // 早退: sweep 走完 + 连续多次完全没有 ccn-* span + charMap 为空
+            //   → weread 这一章纯 canvas 没文字层, 不浪费时间继续轮询
+            const earlyExit = sweepDone && size === 0 && noSpanCount >= noSpanThreshold;
+            // 在认定稳定前先确保 scroll sweep 已经走完, 否则会在 sweep 中途的某个停顿期误判稳定
+            const stable = size > 0 && stableCount >= stableThreshold && sweepDone;
+            const timeout = pollAttempts >= maxAttempts;
+            if (!stable && !timeout && !earlyExit) return;
+
+            clearInterval(timer);
+            clearInterval(sweepTimer);
+            mo.disconnect();
+
+            const chapterTitle = ($('.readerTopBar_title_chapter').text() || '').trim();
+            const bookTitle = ($('.readerTopBar_title_link').text() || '').trim();
+            const chars = Array.from(charMap.values());
+
+            if (chars.length === 0) {
+                if (earlyExit) {
+                    printLog(`phase 1 早退: 该章节没有 ccn-* span (纯 canvas 无文字层), 直接进入伪装模式`);
+                } else {
+                    printLog('error', `harvest 失败: 抓到 0 字 (timeout=${timeout}). 直接进入伪装模式 (无文字层)`);
+                }
+                $mask.remove();
+                common();
+                weread(null);
+                return;
+            }
+
+            printLog(`harvest 完成: ${chars.length} 字 (stable=${stable}, timeout=${timeout}), 写缓存并 reload`);
+            writeWereadCache({
+                chars: chars,
+                chapterTitle: chapterTitle,
+                bookTitle: bookTitle
+            });
+            $detail.text(`采集完成 ${chars.length} 字, 即将打开文档…`);
+            setTimeout(function () { location.reload(); }, 200);
+        }, 200);
     }
 
     ///////////////////////////// 站点结束
@@ -1817,10 +2118,21 @@
             common();
             fanqie();
             break;
-        case 'weread.qq.com':
-            common();
-            weread();
+        case 'weread.qq.com': {
+            // 两阶段流程:
+            //   miss -> phase 1: 不调 common(), 在原生页面遮罩 + 抓 ccn-* span -> 写缓存 -> reload
+            //   hit  -> phase 2: common() + weread(cache), canvas 显示 + 缓存文字行追加
+            const wereadCache = readWereadCache();
+            if (wereadCache && wereadCache.chars && wereadCache.chars.length > 0) {
+                printLog(`命中文字缓存 (${wereadCache.chars.length} 字), 直接进入伪装模式`);
+                common();
+                weread(wereadCache);
+            } else {
+                printLog('未命中文字缓存, 进入 phase 1: 在原生页面抓取文字');
+                wereadHarvestPhase();
+            }
             break;
+        }
         default:
             printLog("error", "当前站点未适配 (本精简版仅支持起点/番茄/微信读书)");
     }
