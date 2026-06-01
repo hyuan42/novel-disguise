@@ -1614,7 +1614,7 @@
                 const $container = $('.wr_canvasContainer');
                 const $canvases = $container.find('canvas');
                 const styleAttr = $container.attr('style') || '';
-                const heightMatch = styleAttr.match(/height:\s*(\d+)px/i);
+                const heightMatch = styleAttr.match(/height:\s*([\d.]+)px/i);
                 const totalHeight = heightMatch ? parseInt(heightMatch[1]) : 0;
 
                 // 计算所有 canvas 实际覆盖到的最大 y 位置, 判断 weread 是否画完
@@ -1719,7 +1719,7 @@
 
             // 读取容器原始宽度 (微信读书固定 798), 准备缩放
             const origStyleAttr = $container.attr('style') || '';
-            const widthMatch = origStyleAttr.match(/width:\s*(\d+)px/i);
+            const widthMatch = origStyleAttr.match(/width:\s*([\d.]+)px/i);
             const origWidth = widthMatch ? parseInt(widthMatch[1]) : 798;
             const scaledWidth = Math.ceil(origWidth * scale);
 
@@ -1802,7 +1802,7 @@
                 const $newContainer = $('.app_content .wr_canvasContainer').not($canvasCell.find('.wr_canvasContainer'));
                 if ($newContainer.length) {
                     const styleAttr = $newContainer.attr('style') || '';
-                    const heightMatch = styleAttr.match(/height:\s*(\d+)px/i);
+                    const heightMatch = styleAttr.match(/height:\s*([\d.]+)px/i);
                     const newHeight = heightMatch ? parseInt(heightMatch[1]) : 0;
                     if (newHeight > 100) {
                         scheduleReload('新 canvasContainer');
